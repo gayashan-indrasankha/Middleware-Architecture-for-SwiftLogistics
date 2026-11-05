@@ -149,59 +149,54 @@ async function upsertRouteRow(driverId, routeDate) {
   return rows[0].id;
 }
 
-async function upsertRouteStopRow(routeDbId, orderId, stop) {
-  const existing = await pool.query(
-    'SELECT id FROM route_stops WHERE route_id = $1 AND order_id = $2',
-    [routeDbId, orderId],
+async function upsertRouteStopRow(db, routeDbId, orderId, stop) {
+  const values = [
+    stop.sequence,
+    stop.delivery_lat,
+    stop.delivery_lng,
+    stop.estimated_arrival,
+    databaseStopStatus(stop.status),
+  ];
+  const updated = await db.query(
+    `UPDATE route_stops
+     SET sequence_index = $1, latitude = $2, longitude = $3,
+         eta = $4, stop_status = $5
+     WHERE route_id = $6 AND order_id = $7`,
+    [...values, routeDbId, orderId],
   );
 
-  if (existing.rows.length > 0) {
-    await pool.query(
-      `UPDATE route_stops
-       SET sequence_index = $1, latitude = $2, longitude = $3,
-           eta = $4, stop_status = $5
-       WHERE id = $6`,
-      [
-        stop.sequence,
-        stop.delivery_lat,
-        stop.delivery_lng,
-        stop.estimated_arrival,
-        databaseStopStatus(stop.status),
-        existing.rows[0].id,
-      ],
-    );
-    return;
-  }
-
-  // sequence_index has a UNIQUE(route_id, sequence_index) constraint, and
-  // re-optimising can reassign an index another stop already holds — retry
-  // once with a temporary offset if that happens, rather than failing the
-  // whole persistence pass over one collision.
-  try {
-    await pool.query(
-      `INSERT INTO route_stops (route_id, order_id, sequence_index, latitude, longitude, eta, stop_status)
+  if (updated.rowCount === 0) {
+    await db.query(
+      `INSERT INTO route_stops (sequence_index, latitude, longitude, eta, stop_status, route_id, order_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [routeDbId, orderId, stop.sequence, stop.delivery_lat, stop.delivery_lng, stop.estimated_arrival, databaseStopStatus(stop.status)],
+      [...values, routeDbId, orderId],
     );
-  } catch (error) {
-    if (error.code === '23505') {
-      await pool.query(
-        `UPDATE route_stops SET sequence_index = $1 + 1000
-         WHERE route_id = $2 AND sequence_index = $1 AND order_id != $3`,
-        [stop.sequence, routeDbId, orderId],
-      );
-      await pool.query(
-        `INSERT INTO route_stops (route_id, order_id, sequence_index, latitude, longitude, eta, stop_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [routeDbId, orderId, stop.sequence, stop.delivery_lat, stop.delivery_lng, stop.estimated_arrival, databaseStopStatus(stop.status)],
-      );
-    } else {
-      throw error;
-    }
   }
 }
 
+// Re-optimising can give a stop an index another stop still holds, which
+// would violate UNIQUE (route_id, sequence_index). Moving every stop to a
+// temporary negative index first means no final index can collide. The temp
+// range starts below any existing value, so that move cannot collide either.
+async function releaseStopSequences(db, routeDbId) {
+  await db.query(
+    `UPDATE route_stops rs
+     SET sequence_index = temp.sequence_index
+     FROM (
+       SELECT id,
+              -(row_number() OVER ())::int - (
+                SELECT COALESCE(MAX(ABS(sequence_index)), 0)
+                FROM route_stops WHERE route_id = $1
+              ) AS sequence_index
+       FROM route_stops WHERE route_id = $1
+     ) temp
+     WHERE rs.id = temp.id`,
+    [routeDbId],
+  );
+}
+
 async function persistRouteToDb(route) {
+  const db = await pool.connect();
   try {
     const driverId = await getDriverIdByCode(route.driver_code);
     if (!driverId) {
@@ -211,20 +206,32 @@ async function persistRouteToDb(route) {
 
     const routeDbId = await upsertRouteRow(driverId, route.date);
 
+    await db.query('BEGIN');
+    // Serialise concurrent saves of the same route.
+    await db.query('SELECT id FROM routes WHERE id = $1 FOR UPDATE', [routeDbId]);
+    await releaseStopSequences(db, routeDbId);
+
     for (const stop of route.stops) {
       const orderId = await getOrderIdByCode(stop.order_code);
       if (!orderId) {
         console.error(`ROS persistence: no order found for code ${stop.order_code}`);
         continue;
       }
-      await upsertRouteStopRow(routeDbId, orderId, stop);
-      await pool.query(
+      await upsertRouteStopRow(db, routeDbId, orderId, stop);
+      await db.query(
         `UPDATE orders SET status = 'assigned', updated_at = now() WHERE id = $1 AND status = 'pending'`,
         [orderId],
       );
     }
+
+    // Any stop still negative is no longer on the route.
+    await db.query('DELETE FROM route_stops WHERE route_id = $1 AND sequence_index < 0', [routeDbId]);
+    await db.query('COMMIT');
   } catch (error) {
+    await db.query('ROLLBACK').catch(() => {});
     console.error('ROS persistence failed (route stays in-memory only for now):', error.message);
+  } finally {
+    db.release();
   }
 }
 

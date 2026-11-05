@@ -212,23 +212,18 @@ function dispatchWebSocketMessage({ target, recipientId, eventType, orderCode, p
     ...payload,
   });
 
-  if (target === 'client' && recipientId) {
-    const sockets = clientSockets.get(recipientId);
-    if (sockets) {
-      sockets.forEach((s) => s.readyState === WebSocket.OPEN && s.send(data));
-    }
+  const sendTo = (sockets) => {
+    sockets?.forEach((s) => s.readyState === WebSocket.OPEN && s.send(data));
+  };
+
+  if (target === 'client') {
+    // An unknown owner must never widen delivery to other clients.
+    sendTo(clientSockets.get(recipientId));
   } else if (target === 'driver' && recipientId) {
-    const sockets = driverSockets.get(recipientId);
-    if (sockets) {
-      sockets.forEach((s) => s.readyState === WebSocket.OPEN && s.send(data));
-    }
-  } else {
-    // Broadcast to all active sockets
-    wss.clients.forEach((s) => {
-      if (s.readyState === WebSocket.OPEN) {
-        s.send(data);
-      }
-    });
+    sendTo(driverSockets.get(recipientId));
+  } else if (target === 'driver') {
+    // Dispatch notices go to every driver, and never to clients.
+    driverSockets.forEach(sendTo);
   }
 }
 
@@ -853,11 +848,14 @@ app.put('/api/packages/status', authenticateToken, requireRole('driver'), asyncR
     status: req.body.status,
   });
 
-  if (result.success && req.body.order_code) {
+  const packageOrderCode = result.order_code || req.body.order_code;
+  if (result.success && packageOrderCode) {
+    const packageOrder = await getOrderIdByCode(packageOrderCode);
     dispatchWebSocketMessage({
       target: 'client',
+      recipientId: packageOrder ? await getClientCodeById(packageOrder.client_id) : null,
       eventType: 'PACKAGE_STATUS_UPDATED',
-      orderCode: req.body.order_code,
+      orderCode: packageOrderCode,
       payload: { status: req.body.status, message: `Package status updated to ${req.body.status}` },
     });
   }

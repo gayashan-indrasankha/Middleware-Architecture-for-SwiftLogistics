@@ -117,7 +117,10 @@ async function showDetails(id) {
   $('#detailsTitle').textContent = id; $('#detailsContent').innerHTML = '<p class="details-message">Loading tracking information…</p>'; $('#detailsDialog').showModal();
   let result; try { result = await api(`/api/orders/${encodeURIComponent(id)}`); } catch { result = { order: state.orders.find((order) => [order.order_id, order.order_code, order.id].includes(id)) }; }
   const order = result.order || result.data || {}; const pack = result.package || result.packages?.[0] || {}; const route = result.route || {};
-  const fields = [['Status', order.status], ['Pickup', order.pickup_address], ['Delivery', order.delivery_address], ['Package barcode', pack.barcode], ['Warehouse location', pack.warehouse_location || pack.location], ['Driver', route.driver_id || route.driver_code], ['Estimated arrival', route.estimated_arrival || route.eta], ['Transaction', result.transaction_id || order.transaction_id]];
+  const warehouseLocation = [pack.warehouse_zone, pack.bin_location].filter(Boolean).join(' · ');
+  const eta = route.estimated_arrival || route.eta;
+  const lastSagaStep = result.saga_logs?.at(-1);
+  const fields = [['Status', order.status], ['Pickup', order.pickup_address], ['Delivery', order.delivery_address], ['Package barcode', pack.barcode], ['Warehouse location', warehouseLocation], ['Driver', route.driver_name || route.driver_code], ['Estimated arrival', eta && new Date(eta).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })], ['Latest transaction step', lastSagaStep && `${lastSagaStep.saga_step} (${lastSagaStep.status})`]];
   $('#detailsContent').innerHTML = `<div class="details-grid">${fields.map(([label, value]) => `<div class="detail-card"><span>${label}</span><strong>${escapeHtml(value || 'Awaiting update')}</strong></div>`).join('')}</div>`;
 }
 $$('[data-close-details]').forEach((button) => button.addEventListener('click', () => $('#detailsDialog').close()));

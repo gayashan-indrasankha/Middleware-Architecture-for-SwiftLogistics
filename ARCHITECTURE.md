@@ -71,7 +71,7 @@ API Gateway subscribes to all three exchanges (gateway_event_queue):
   order_events + route_events + wms_events → Saga coordinator
 ```
 
-All exchanges are declared `durable: true` and messages use `delivery_mode: 2` (persistent), so no events are lost during service restarts.
+All exchanges are declared `durable: true` and messages use `delivery_mode: 2` (persistent), so queued events survive a broker or consumer restart. A message that fails during processing is discarded, because there is no dead-letter queue yet.
 
 ### 4. Saga Pattern (Distributed Transaction Coordinator)
 
@@ -92,7 +92,7 @@ Creating an order involves three separate services. SwiftTrack uses a **choreogr
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Each Saga step is persisted to the `transaction_logs` table so the state survives a gateway restart. The compensation path marks the order as `failed` in PostgreSQL and dispatches a `SAGA_COMPENSATED` WebSocket event to the affected client.
+Each Saga step is written to the `transaction_logs` table as a durable audit trail. In-progress state lives in gateway memory and is not reloaded after a gateway restart. Compensation currently runs through the `POST /api/saga/simulate-failure` endpoint. It marks the order as `failed` in PostgreSQL and dispatches a `SAGA_COMPENSATED` WebSocket event to the affected client.
 
 ### 5. Canonical Data Model
 

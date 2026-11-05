@@ -10,7 +10,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker_Compose-8_containers-2496ED?logo=docker&logoColor=white)
 ![WebSocket](https://img.shields.io/badge/WebSocket-live_events-010101)
-![E2E](https://img.shields.io/badge/E2E_checks-14%2F14_passing-2EA44F)
+[![E2E](https://github.com/gayashan-indrasankha/Middleware-Architecture-for-SwiftLogistics/actions/workflows/e2e.yml/badge.svg)](https://github.com/gayashan-indrasankha/Middleware-Architecture-for-SwiftLogistics/actions/workflows/e2e.yml)
 
 <br>
 
@@ -29,16 +29,16 @@
 | **What it is** | An integration platform for a fictional logistics company whose three core systems speak incompatible protocols. Clients and drivers get one clean API and live updates. |
 | **Why it's hard** | One order is a *distributed transaction* across SOAP/XML, REST and raw TCP, with no shared protocol and services that can go down independently. |
 | **My role** | **Integration & QA engineer** in a team of six (university module IS3208, Middleware Architecture). I got the separately built services working together, wrote the end-to-end test suite, and found and fixed the cross-service bugs that blocked the core flow. |
-| **Proof it works** | 14/14 end-to-end checks pass, and a saga finishes in about 45 ms on a local run. Orders created during a backend outage [finish processing when it recovers](#-verified-behaviour). |
+| **Proof it works** | 24 automated checks run on every pull request, and a saga finishes in under 50 ms on a local run. Orders created during a backend outage [finish processing when it recovers](#-verified-behaviour). |
 
 ### What this project shows about me
 
 | Skill | Where you can see it |
 |---|---|
 | **Debugging across service boundaries** | Traced a stalled transaction to a mismatch between what one service published and what another expected ([details](#-my-contribution-integration-testing--bug-fixing)) |
-| **Test automation** | A [scripted E2E suite](https://github.com/gayashan-indrasankha/Middleware-Architecture-for-SwiftLogistics/blob/2325a68/plans/test-e2e.ps1) covering login → order → saga → route → warehouse → delivery → failure |
+| **Test automation** | A scripted [E2E suite](tests/e2e.ps1) covering login → order → saga → route → warehouse → delivery → failure, running in CI |
 | **Distributed systems** | Saga pattern, publish/subscribe, durable messaging, eventual consistency |
-| **Multi-tenant awareness** | Spotted delivery events going to every connected client and scoped them to the right recipient |
+| **Multi-tenant awareness** | Scoped events that were reaching every connected client to the right recipient, with a [test](tests/ws-isolation.mjs) that proves it |
 | **Infrastructure** | Docker Compose health-check tuning to make cold starts reliable |
 | **Engineering honesty** | A public [list of known limitations](#-known-limitations--what-id-do-next) with the production fix for each |
 
@@ -188,7 +188,8 @@ stateDiagram-v2
 <td><img src="docs/screenshots/04-client-live-updates.png" alt="Stack of live WebSocket notifications for one order"><br><sub><b>Live events.</b> Saga steps for one order arrive within milliseconds, with no refresh.</sub></td>
 </tr>
 <tr>
-<td colspan="2" align="center"><img src="docs/screenshots/09-client-delivery-event.png" alt="Client live updates panel showing a delivered event" width="70%"><br><sub><b>Closing the loop.</b> When a driver submits proof of delivery, the owning client is told immediately.</sub></td>
+<td><img src="docs/screenshots/09-client-delivery-event.png" alt="Client live updates panel showing a delivered event"><br><sub><b>Closing the loop.</b> When a driver submits proof of delivery, the owning client is told immediately.</sub></td>
+<td><img src="docs/screenshots/10-client-order-details.png" alt="Order details dialog with warehouse location, driver, ETA and transaction step"><br><sub><b>One view of three systems.</b> Warehouse, route and saga data for a single order.</sub></td>
 </tr>
 </table>
 
@@ -266,53 +267,67 @@ The delivery endpoint now matches a stop on either `order_code` or `order_id`. P
 
 ### 🧪 End-to-end test suite
 
-I wrote a [PowerShell E2E suite](https://github.com/gayashan-indrasankha/Middleware-Architecture-for-SwiftLogistics/blob/2325a68/plans/test-e2e.ps1) that drives the system through its public API, exactly as a real client and driver would:
+I wrote a [PowerShell E2E suite](tests/e2e.ps1) that drives the system through its public API, exactly as a real client and driver would:
 
 ```mermaid
 flowchart LR
     A[Health] --> B[Client login<br/>via SOAP] --> C[Create order] --> D[Poll until<br/>assigned]
     D --> E[Check saga<br/>audit log] --> F[Driver login] --> G[Fetch route]
     G --> H[Update package<br/>via TCP] --> I[Deliver with<br/>signature] --> J[Verify<br/>delivered]
-    J --> K[Inject failure] --> L[Verify<br/>compensation]
+    J --> K[Inject failure] --> L[Verify<br/>compensation] --> M[Re-sequence<br/>route]
 ```
+
+### 🛠️ Later fixes
+
+Writing down the project's known limitations led to a second round of fixes. Each one has a test that failed before the fix:
+
+| Problem | Fix | Test |
+|---|---|---|
+| Re-sequencing a route violated a unique constraint, which left new orders `pending` after their saga completed | [Save the whole route in one locked transaction](ros-service/app.js) | [`tests/e2e.ps1`](tests/e2e.ps1), step 11 |
+| Other clients received new-order, route and package events that weren't theirs | [Remove the broadcast fallback and target each event](api-gateway/app.js) | [`tests/ws-isolation.mjs`](tests/ws-isolation.mjs) |
+
+The order details dialog also now shows real warehouse, driver, ETA and transaction data, and both test suites run in [GitHub Actions](.github/workflows/e2e.yml).
 
 ---
 
 ## ✅ Verified behaviour
 
-These results come from the system running locally in Docker Desktop on 4 November 2026, after a fresh `docker compose up --build`. They are observations from a single machine, **not load-test benchmarks**.
+These results come from the system running locally in Docker Desktop on 5 November 2026, after `docker compose up --build`. They are observations from a single machine, **not load-test benchmarks**.
 
-### End-to-end suite: 14/14 checks passing
+### Test suites: 24/24 checks passing (19 E2E, 5 isolation)
 
 ```text
 ==> STEP 2 -- Create New Order
-  [PASS] Order created: ORD-0012 (status: pending)
+  [PASS] Order created: ORD-0041 (status: pending)
 ==> STEP 4 -- Verify Saga Transaction Logs
        Saga steps: CMS_CREATE, ROS_ASSIGN, WMS_ALLOCATE, SAGA_COMPLETE
 ==> STEP 7 -- Update Package Status via WMS TCP Bridge
-  [PASS] Package status updated to 'loaded' (barcode: BC-ORD-0012)
+  [PASS] Package status updated to 'loaded' (barcode: BC-ORD-0041)
 ==> STEP 9 -- Verify Final Order Status
-  [PASS] Order ORD-0012 is now 'delivered' -- END-TO-END FLOW COMPLETE
+  [PASS] Order ORD-0041 is now 'delivered' -- END-TO-END FLOW COMPLETE
 ==> STEP 10 -- Saga Compensation / Fallback Test
   [PASS] SAGA_COMPENSATION step found in transaction log - fallback mechanism verified OK
+==> STEP 11 -- Orders Reach 'assigned' When The Route Is Re-sequenced
+  [PASS] Persisted route matches the driver's route (27 stops)
 
-  E2E Order Flow    : PASSED (ORD-0012)
-  Saga Logs         : PASSED -- CMS_CREATE, ROS_ASSIGN recorded
+  E2E Order Flow    : PASSED (ORD-0041)
+  Saga Logs         : PASSED -- all saga steps recorded
   Delivery + POD    : PASSED -- signature captured
-  Saga Compensation : PASSED -- ORD-0013 rolled back
+  Saga Compensation : PASSED -- ORD-0042 rolled back
+  Re-sequencing     : PASSED -- all orders assigned
 ```
 
-<sub>Excerpt. Timings for the saga below come from the `transaction_logs` table.</sub>
+<sub>Excerpt. The timings below come from the `transaction_logs` table.</sub>
 
-### A saga completes in about 45 ms
+### A saga completes in under 50 ms
 
 ```text
  order_code |   saga_step   | ms after order created
 ------------+---------------+-----------------------
- ORD-0017   | CMS_CREATE    | 20
- ORD-0017   | ROS_ASSIGN    | 26
- ORD-0017   | WMS_ALLOCATE  | 44
- ORD-0017   | SAGA_COMPLETE | 46
+ ORD-0041   | CMS_CREATE    | 16
+ ORD-0041   | ROS_ASSIGN    | 20
+ ORD-0041   | WMS_ALLOCATE  | 30
+ ORD-0041   | SAGA_COMPLETE | 34
 ```
 
 ### Orders survive a backend outage
@@ -322,12 +337,10 @@ Tested by stopping ROS mid-flow. The broker holds the message until the consumer
 | Step | Action | Result |
 |---|---|---|
 | 1 | `docker stop swift-ros` | ROS is offline |
-| 2 | Client creates `ORD-0014` | ✅ **Accepted.** The client isn't blocked by the outage |
+| 2 | Client creates `ORD-0039` | ✅ **Accepted.** The client isn't blocked by the outage |
 | 3 | Inspect state | WMS step done. `ros_order_events` holds **1 message with 0 consumers** |
 | 4 | `docker start swift-ros` | ROS reconnects and consumes the waiting message |
-| 5 | Check the saga log | ✅ `ROS_ASSIGN` and `SAGA_COMPLETE` recorded with no manual action |
-
-<sub>The order's own status stayed `pending` in this run because of the route persistence issue listed under [known limitations](#-known-limitations--what-id-do-next).</sub>
+| 5 | Check the saga log | ✅ `ROS_ASSIGN` and `SAGA_COMPLETE` recorded and the order is `assigned`, with no manual action |
 
 ### Protocol translation on the wire
 
@@ -360,14 +373,13 @@ This is an academic project, and I'd rather state its gaps than hide them. Each 
 
 | Area | Current behaviour | Production fix |
 |---|---|---|
-| **Route persistence** | Re-sequencing a route can violate `UNIQUE (route_id, sequence_index)`. The route stays in ROS memory, but the order remains `pending` in the database even after its saga completes. | Make the constraint `DEFERRABLE` and rewrite stops in one transaction |
 | **Compensation** | Runs only through a fault-injection endpoint. It marks the order failed and alerts the client, but doesn't undo ROS or WMS work. | Emit failure events from each service, and add real compensating actions plus timeouts |
 | **Failed messages** | Consumers `nack` without requeue, so a message that fails processing is discarded. | Dead-letter queues, bounded retries and alerting |
 | **Saga state** | Steps are audited in PostgreSQL, but in-progress state lives in gateway memory and isn't reloaded on restart. | Rehydrate active sagas from `transaction_logs` |
-| **Event isolation** | I scoped delivery events, but `PACKAGE_STATUS_UPDATED` and `ROUTE_UPDATED` still broadcast, and WebSocket registration isn't authenticated. | Authenticate sockets with the JWT and derive recipients from it |
+| **WebSocket auth** | Events are now targeted, but a socket can still register under any client or driver ID. | Authenticate sockets with the JWT and derive the recipient from it |
 | **Routing** | Every order goes to one driver (`DRV001`). Coordinates are estimated from the address, and the form's priority and coordinates aren't forwarded. | Driver allocation, a geocoding service and priority-aware routing |
 | **Auth & secrets** | Driver login uses a demo account list, secrets have dev defaults, and any signed-in user can call the failure endpoint. | Database-backed drivers, a secrets manager, admin-only test endpoints |
-| **Test depth** | E2E coverage only, with no CI pipeline, unit tests or load tests. | Contract tests between services (these would have caught Bug 1), CI, and a load test with k6 |
+| **Test depth** | E2E and isolation tests run in CI, but there are no unit, contract or load tests. | Contract tests between services (these would have caught Bug 1) and a load test with k6 |
 
 ---
 
@@ -505,6 +517,8 @@ Events: `ORDER_CREATED`, `ROS_PROCESSING_COMPLETE`, `WMS_PROCESSING_COMPLETE`, `
 ├── client-portal/    # Client web dashboard (Nginx)
 ├── driver-app/       # Driver mobile-first PWA (Nginx)
 ├── database/         # PostgreSQL schema and seed data
+├── tests/            # E2E suite and WebSocket isolation test
+├── .github/workflows/ # CI: runs both test suites against the full stack
 ├── docs/screenshots/ # Images used in this README
 ├── docker-compose.yml
 └── ARCHITECTURE.md   # Integration pattern deep dive
@@ -520,7 +534,7 @@ SwiftTrack was a six-person group assignment for **IS3208 Middleware Architectur
 
 | Contributor | Main contribution |
 |---|---|
-| **Gayashan Indrasankha** (me) | Phase 6: full-system integration, E2E test suite, cross-service bug fixes |
+| **Gayashan Indrasankha** (me) | Phase 6: full-system integration, E2E test suite, cross-service bug fixes, later fixes and CI |
 | **Viman Fernando** | Project planning, work distribution, documentation |
 | **Vidurshan** | Database schema, Docker Compose, gateway scaffold, ROS persistence |
 | **Hesara Dihindu** | Core backend services, gateway protocol bridging |
